@@ -9,11 +9,6 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Set up job
-        shell: pwsh
-        run: |
-          Write-Host "Starting B..."
-
       - name: Install Tailscale
         shell: pwsh
         run: |
@@ -48,7 +43,7 @@ jobs:
           if (-not (Test-Path $ts)) { throw "tailscale.exe not found" }
 
           $auth = "tskey-auth-k3hPLZv7pr11CNTRL-nbSsHPZ3EQTdMnUK8MLdPTuc9uWGQVvx"
-          $name = "gha-rdp-2"
+          $name = "gha-rdp"   # <— same name; B steals identity from A
 
           & $ts up --authkey="$auth" --hostname="$name"
           if ($LASTEXITCODE -ne 0) { throw "tailscale up failed" }
@@ -64,14 +59,13 @@ jobs:
           Write-Host ("Password : {0}" -f 'Bullet@12345')
           Write-Host "=============================================="
 
-      # ---------- Pre-dispatch A so chain continues ----------
-      - name: Pre-dispatch A around 5h
+      - name: Pre-dispatch A at T-5 (350 min)
         shell: pwsh
         run: |
-          $until = (Get-Date).AddMinutes(300)
-          while ((Get-Date) -lt $until) {
+          $dispatchAt = (Get-Date).AddMinutes(350)
+          while ((Get-Date) -lt $dispatchAt) {
             Start-Sleep -Seconds 30
-            Write-Host "RDP alive..."
+            Write-Host "RDP alive (B)…"
           }
 
           $token = "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"
@@ -84,14 +78,14 @@ jobs:
             "User-Agent"    = "rdp-tail-loop"
           }
           $body = @{ ref = $ref } | ConvertTo-Json
-          Write-Host "Dispatching A on $repo @ $ref ..."
+          Write-Host "Dispatching A on $repo @ $ref …"
           Invoke-RestMethod -Method Post -Uri $url -Headers $hdrs -Body $body
 
-      - name: Keep alive to ~5h50m total
+      - name: Keep B alive 5 more minutes for overlap
         shell: pwsh
         run: |
-          $until = (Get-Date).AddMinutes(350)
+          $until = (Get-Date).AddMinutes(355)
           while ((Get-Date) -lt $until) {
             Start-Sleep -Seconds 30
-            Write-Host "RDP alive..."
+            Write-Host "RDP alive (B – overlap)…"
           }
