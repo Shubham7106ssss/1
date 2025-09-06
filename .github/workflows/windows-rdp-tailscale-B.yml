@@ -13,12 +13,12 @@ jobs:
     timeout-minutes: 360
 
     env:
-      TS_AUTHKEY: tskey-auth-kd7bFpSmfw11CNTRL-wTtb2mVxUsC8shs41Y1brCnM8NPrWp71
-      TS_APIKEY:  tskey-api-kWjqKHRj9z11CNTRL-9MGhSXzSqWdnmUVzDMSGXdCD1xgxUoKQ
-      TS_TAILNET: shubham.ind7106@gmail.com
-      TS_HOST:    ram
-      RDP_USER:   ramwin
-      RDP_PASS:   Shubham@7106
+      TS_AUTHKEY:  ${{ secrets.TS_AUTHKEY }}
+      TS_APIKEY:   ${{ secrets.TS_APIKEY }}
+      TS_TAILNET:  ${{ secrets.TS_TAILNET }}
+      TS_HOST:     ${{ secrets.TS_HOST }}
+      RDP_USER:    ${{ secrets.RDP_USER }}
+      RDP_PASS:    ${{ secrets.RDP_PASS }}
 
     steps:
       - name: Install Tailscale (via choco)
