@@ -6,15 +6,9 @@ on:
 jobs:
   rdp:
     runs-on: windows-latest
-    timeout-minutes: 360  # max 6h
+    timeout-minutes: 360   # GH max ~6h
 
     steps:
-      - name: Set up job
-        shell: pwsh
-        run: |
-          Write-Host "Starting A..."
-
-      # --- FIXED: working MSI URL ---
       - name: Install Tailscale
         shell: pwsh
         run: |
@@ -48,17 +42,12 @@ jobs:
           $ts = "${env:ProgramFiles}\Tailscale\tailscale.exe"
           if (-not (Test-Path $ts)) { throw "tailscale.exe not found" }
 
-          # your inlined Tailscale auth key (reusable + ephemeral per your note earlier is OK)
           $auth = "tskey-auth-k3hPLZv7pr11CNTRL-nbSsHPZ3EQTdMnUK8MLdPTuc9uWGQVvx"
+          $name = "gha-rdp"   # <— SAME NAME in A & B to transfer identity/IP
 
-          # fixed device name for “best chance” of same MagicDNS name
-          $name = "gha-rdp"
-
-          # log in / bring up
           & $ts up --authkey="$auth" --hostname="$name"
           if ($LASTEXITCODE -ne 0) { throw "tailscale up failed" }
 
-          # print connection info
           $ip4 = (& $ts ip -4 | Select-Object -First 1)
           $ip6 = (& $ts ip -6 | Select-Object -First 1)
           Write-Host "================ RDP CONNECT ================="
@@ -70,17 +59,16 @@ jobs:
           Write-Host ("Password : {0}" -f 'Bullet@12345')
           Write-Host "=============================================="
 
-      # ---------- Partner pre-dispatch (fires workflow B ~5h in) ----------
-      - name: Pre-dispatch partner (B) around 5h
+      - name: Pre-dispatch B at T-5 (350 min)
         shell: pwsh
         run: |
-          $until = (Get-Date).AddMinutes(300)   # ~5h
-          while ((Get-Date) -lt $until) {
+          # Wait until 350 min (T-10) then dispatch B and keep A alive to 355 min (≈T-5 overlap)
+          $dispatchAt = (Get-Date).AddMinutes(350)
+          while ((Get-Date) -lt $dispatchAt) {
             Start-Sleep -Seconds 30
-            Write-Host "RDP alive..."
+            Write-Host "RDP alive (A)…"
           }
 
-          # Dispatch workflow B so the next A will be staged
           $token = "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"
           $repo  = $env:GITHUB_REPOSITORY
           $ref   = $env:GITHUB_REF_NAME; if (-not $ref) { $ref = "main" }
@@ -91,15 +79,14 @@ jobs:
             "User-Agent"    = "rdp-tail-loop"
           }
           $body = @{ ref = $ref } | ConvertTo-Json
-          Write-Host "Dispatching B on $repo @ $ref ..."
+          Write-Host "Dispatching B on $repo @ $ref …"
           Invoke-RestMethod -Method Post -Uri $url -Headers $hdrs -Body $body
 
-      # ---------- Finish out the remaining ~50 minutes ----------
-      - name: Keep alive to ~5h50m total
+      - name: Keep A alive 5 more minutes for overlap
         shell: pwsh
         run: |
-          $until = (Get-Date).AddMinutes(350)   # total ≈ 5h50m
+          $until = (Get-Date).AddMinutes(355)
           while ((Get-Date) -lt $until) {
             Start-Sleep -Seconds 30
-            Write-Host "RDP alive..."
+            Write-Host "RDP alive (A – overlap)…"
           }
