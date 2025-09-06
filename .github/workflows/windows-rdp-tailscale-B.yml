@@ -13,12 +13,12 @@ jobs:
     timeout-minutes: 360
 
     env:
-      TS_AUTHKEY: tskey-auth-kCBNtpbt3H11CNTRL-rJdYwx6bnR59Gj4ivN4DR5JKvahLZ5ML
-      TS_APIKEY:  tskey-api-k8k6TMrxJD21CNTRL-UZ4q4DdnFicBmuLEc4DqicCcr34WBQkrC
-      TS_TAILNET: zatchati0@gmail.com
-      TS_HOST:    bullet
-      RDP_USER:   Bullettemporary
-      RDP_PASS:   Bullet@12345
+      TS_AUTHKEY: tskey-auth-kKEHqNgFw411CNTRL-D4yWMxRDo5di6rFhhhsP5d9sWFuqxV746
+      TS_APIKEY:  tskey-api-k6E3njqsgN11CNTRL-kuvbUT1AmQTqAPYSjnmJRTeKG73KXWbr7
+      TS_TAILNET: shubham.ind7106@gmail.com
+      TS_HOST:    ram
+      RDP_USER:   ramwin
+      RDP_PASS:   Shubham@7106
 
     steps:
       - name: Install Tailscale (via choco)
@@ -45,7 +45,7 @@ jobs:
             Enable-LocalUser -Name $u
           }
 
-      - name: Purge ANY existing 'bullet' devices from tailnet
+      - name: Purge ANY existing devices with hostname
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -53,17 +53,18 @@ jobs:
           $apiKey  = "${env:TS_APIKEY}"
           $hdr = @{ Authorization = "Bearer $apiKey" }
           $tenc = [Uri]::EscapeDataString($tailnet)
-          function Get-BulletDevices {
+          $hostname = "${env:TS_HOST}"
+          function Get-MyDevices {
             $url = "https://api.tailscale.com/api/v2/tailnet/$tenc/devices?fields=all"
             $resp = Invoke-RestMethod -Method GET -Headers $hdr -Uri $url
             return $resp.devices | Where-Object {
-              $_.hostname -eq 'bullet' -or
-              $_.name     -eq 'bullet' -or
-              ($_.dnsName -match '^bullet\.')
+              $_.hostname -eq $hostname -or
+              $_.name     -eq $hostname -or
+              ($_.dnsName -match "^$hostname\.")
             }
           }
           for ($try=1; $try -le 5; $try++) {
-            $victims = Get-BulletDevices
+            $victims = Get-MyDevices
             if (-not $victims) { break }
             foreach ($d in $victims) {
               Write-Host "Deleting old device: $($d.id)  host=$($d.hostname)  dns=$($d.dnsName)"
@@ -73,7 +74,7 @@ jobs:
             }
             Start-Sleep -Seconds 2
           }
-          if (Get-BulletDevices) { Write-Warning "Some bullet devices still present." } else { Write-Host "All previous 'bullet' devices removed." }
+          if (Get-MyDevices) { Write-Warning "Some devices still present." } else { Write-Host "All previous devices removed." }
 
       - name: Tailscale up (fixed hostname)
         shell: pwsh
