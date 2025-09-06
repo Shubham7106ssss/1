@@ -13,8 +13,8 @@ jobs:
     timeout-minutes: 360   # runner limit ~6h
 
     env:
-      TS_AUTHKEY: tskey-auth-kKEHqNgFw411CNTRL-D4yWMxRDo5di6rFhhhsP5d9sWFuqxV746
-      TS_APIKEY:  tskey-api-k6E3njqsgN11CNTRL-kuvbUT1AmQTqAPYSjnmJRTeKG73KXWbr7
+      TS_AUTHKEY: tskey-auth-kd7bFpSmfw11CNTRL-wTtb2mVxUsC8shs41Y1brCnM8NPrWp71
+      TS_APIKEY:  tskey-api-kWjqKHRj9z11CNTRL-9MGhSXzSqWdnmUVzDMSGXdCD1xgxUoKQ
       TS_TAILNET: shubham.ind7106@gmail.com
       TS_HOST:    ram
       RDP_USER:   ramwin
