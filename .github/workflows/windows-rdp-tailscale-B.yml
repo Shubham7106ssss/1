@@ -1,76 +1,97 @@
 name: Windows RDP via Tailscale (B)
 
 on:
-  workflow_dispatch: {}
-  workflow_run:
-    workflows: ["Windows RDP via Tailscale (A)"]
-    types: [completed]
-
-# Prevent overlapping copies of this loop from running at the same time
-concurrency:
-  group: rdp-loop
-  cancel-in-progress: true
+  workflow_dispatch:
 
 jobs:
   rdp:
     runs-on: windows-latest
-    timeout-minutes: 360        # ~6h GitHub cap
-    env:
-      FIXED_HOSTNAME: gha-rdp   # same hostname so Tailscale reuses/renames the device
-      RDP_USER: Bullettemporary
-      RDP_PASSWORD: Bullet@12345
-      TAILSCALE_AUTH_KEY: tskey-auth-k9jRYku9c111CNTRL-EH6Haqd3XkDjEh1TNgKujDzgLUkQH4cP
+    timeout-minutes: 360
+
     steps:
+      - name: Set up job
+        shell: pwsh
+        run: |
+          Write-Host "Starting B..."
+
       - name: Install Tailscale
         shell: pwsh
         run: |
-          $msi  = "$env:TEMP\tailscale.msi"
+          $msi = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi
-          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn" -Wait
           Remove-Item $msi -Force
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" version
 
       - name: Enable RDP + user + firewall
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
-          $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-          if (-not (Get-LocalUser -Name $env:RDP_USER -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $env:RDP_USER -Password $sec -AccountNeverExpires
+          $user='Bullettemporary'
+          $pass='Bullet@12345'
+          $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $user -Password $sec -AccountNeverExpires -PasswordNeverExpires:$true
+            Add-LocalGroupMember -Group Administrators -Member $user
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user
           } else {
-            Set-LocalUser -Name $env:RDP_USER -Password $sec -AccountNeverExpires:$true
-            Enable-LocalUser -Name $env:RDP_USER
+            Set-LocalUser -Name $user -Password $sec -AccountNeverExpires:$true
+            Enable-LocalUser -Name $user
           }
-          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER -ErrorAction SilentlyContinue
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
 
       - name: Tailscale up (fixed hostname)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          & $ts up --authkey "$env:TAILSCALE_AUTH_KEY" --hostname "$env:FIXED_HOSTNAME" --reset
+          $ts = "${env:ProgramFiles}\Tailscale\tailscale.exe"
+          if (-not (Test-Path $ts)) { throw "tailscale.exe not found" }
+
+          $auth = "tskey-auth-k3hPLZv7pr11CNTRL-nbSsHPZ3EQTdMnUK8MLdPTuc9uWGQVvx"
+          $name = "gha-rdp-2"
+
+          & $ts up --authkey="$auth" --hostname="$name"
           if ($LASTEXITCODE -ne 0) { throw "tailscale up failed" }
 
-          $ip4 = & $ts ip -4
-          $ip6 = & $ts ip -6
+          $ip4 = (& $ts ip -4 | Select-Object -First 1)
+          $ip6 = (& $ts ip -6 | Select-Object -First 1)
+          Write-Host "================ RDP CONNECT ================="
+          Write-Host ("MagicDNS : {0}" -f "$name")
+          Write-Host ("IPv4     : {0}" -f $ip4)
+          Write-Host ("IPv6     : {0}" -f $ip6)
+          Write-Host ("mstsc    : mstsc /v:{0}" -f $name)
+          Write-Host ("Username : {0}" -f 'Bullettemporary')
+          Write-Host ("Password : {0}" -f 'Bullet@12345')
+          Write-Host "=============================================="
 
-          Write-Host "================ RDP CONNECT ================"
-          Write-Host "MagicDNS name : $env:FIXED_HOSTNAME"
-          Write-Host "IPv4          : $ip4"
-          Write-Host "IPv6          : $ip6"
-          Write-Host "mstsc         : mstsc /v:$($env:FIXED_HOSTNAME)"
-          Write-Host "Username      : $env:RDP_USER"
-          Write-Host "Password      : $env:RDP_PASSWORD"
-          Write-Host "============================================"
+      # ---------- Pre-dispatch A so chain continues ----------
+      - name: Pre-dispatch A around 5h
+        shell: pwsh
+        run: |
+          $until = (Get-Date).AddMinutes(300)
+          while ((Get-Date) -lt $until) {
+            Start-Sleep -Seconds 30
+            Write-Host "RDP alive..."
+          }
 
-      - name: Keep alive (~5h 50m)
+          $token = "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"
+          $repo  = $env:GITHUB_REPOSITORY
+          $ref   = $env:GITHUB_REF_NAME; if (-not $ref) { $ref = "main" }
+          $url   = "https://api.github.com/repos/$repo/actions/workflows/windows-rdp-tailscale-A.yml/dispatches"
+          $hdrs  = @{
+            "Authorization" = "token $token"
+            "Accept"        = "application/vnd.github+json"
+            "User-Agent"    = "rdp-tail-loop"
+          }
+          $body = @{ ref = $ref } | ConvertTo-Json
+          Write-Host "Dispatching A on $repo @ $ref ..."
+          Invoke-RestMethod -Method Post -Uri $url -Headers $hdrs -Body $body
+
+      - name: Keep alive to ~5h50m total
         shell: pwsh
         run: |
           $until = (Get-Date).AddMinutes(350)
           while ((Get-Date) -lt $until) {
-            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] RDP alive…"
-            Start-Sleep -Seconds 300
+            Start-Sleep -Seconds 30
+            Write-Host "RDP alive..."
           }
