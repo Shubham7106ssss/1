@@ -2,86 +2,121 @@ name: Windows RDP via Tailscale (A)
 
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Windows RDP via Tailscale (B)"]
-    types: [completed]
+
+permissions:
+  contents: read
+  actions: write
 
 jobs:
   rdp:
     runs-on: windows-latest
+    timeout-minutes: 360   # runner limit ~6h
+
+    env:
+      TS_AUTHKEY: tskey-auth-kCBNtpbt3H11CNTRL-rJdYwx6bnR59Gj4ivN4DR5JKvahLZ5ML
+      TS_APIKEY:  tskey-api-k8k6TMrxJD21CNTRL-UZ4q4DdnFicBmuLEc4DqicCcr34WBQkrC
+      TS_TAILNET: zatchati0@gmail.com
+      TS_HOST:    bullet
+      RDP_USER:   Bullettemporary
+      RDP_PASS:   Bullet@12345
+
     steps:
       - name: Install Tailscale (via choco)
         shell: pwsh
         run: |
           choco install tailscale -y --no-progress
-          # best effort ensure service is available
-          Start-Sleep -Seconds 3
-          Start-Service Tailscale -ErrorAction SilentlyContinue
+          $env:PATH = "$env:ProgramFiles\Tailscale;$env:PATH"
+          tailscale version
 
       - name: Enable RDP + user + firewall
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $u='Bullettemporary'; $p='Bullet@12345'
-          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+          # Enable RDP
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
+          # Create/refresh local user for RDP
+          $u = "${env:RDP_USER}"
+          $p = ConvertTo-SecureString "${env:RDP_PASS}" -AsPlainText -Force
           if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $u -Password $sec -AccountNeverExpires -PasswordNeverExpires:$true
+            New-LocalUser -Name $u -Password $p -AccountNeverExpires -PasswordNeverExpires:$true
             Add-LocalGroupMember -Group Administrators -Member $u
             Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
           } else {
-            Set-LocalUser -Name $u -Password $sec -AccountNeverExpires:$true
+            Set-LocalUser -Name $u -Password $p -AccountNeverExpires:$true
             Enable-LocalUser -Name $u
           }
-          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
 
-      - name: Cleanup old device from Tailscale
+      - name: Purge ANY existing 'bullet' devices from tailnet
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'SilentlyContinue'
-          $hdr = @{ Authorization = "Bearer tskey-api-k8k6TMrxJD21CNTRL-UZ4q4DdnFicBmuLEc4DqicCcr34WBQkrC" }
-          $resp = Invoke-RestMethod -Method GET -Headers $hdr -Uri "https://api.tailscale.com/api/v2/tailnet/zatchati0%40gmail.com/devices"
-          foreach ($d in $resp.devices) {
-            if ($d.hostname -eq 'bullet') {
-              Invoke-RestMethod -Method DELETE -Headers $hdr -Uri ("https://api.tailscale.com/api/v2/device/{0}" -f $d.id) | Out-Null
+          $ErrorActionPreference = 'Stop'
+          $tailnet = "${env:TS_TAILNET}"
+          $apiKey  = "${env:TS_APIKEY}"
+          $hdr = @{ Authorization = "Bearer $apiKey" }
+          $tenc = [Uri]::EscapeDataString($tailnet)
+          function Get-BulletDevices {
+            $url = "https://api.tailscale.com/api/v2/tailnet/$tenc/devices?fields=all"
+            $resp = Invoke-RestMethod -Method GET -Headers $hdr -Uri $url
+            return $resp.devices | Where-Object {
+              $_.hostname -eq 'bullet' -or
+              $_.name     -eq 'bullet' -or
+              ($_.dnsName -match '^bullet\.')
             }
           }
+          for ($try=1; $try -le 5; $try++) {
+            $victims = Get-BulletDevices
+            if (-not $victims) { break }
+            foreach ($d in $victims) {
+              Write-Host "Deleting old device: $($d.id)  host=$($d.hostname)  dns=$($d.dnsName)"
+              $delUrl = "https://api.tailscale.com/api/v2/device/$($d.id)"
+              Invoke-RestMethod -Method DELETE -Headers $hdr -Uri $delUrl | Out-Null
+              Start-Sleep -Milliseconds 500
+            }
+            Start-Sleep -Seconds 2
+          }
+          if (Get-BulletDevices) { Write-Warning "Some bullet devices still present." } else { Write-Host "All previous 'bullet' devices removed." }
 
       - name: Tailscale up (fixed hostname)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ts = Join-Path $Env:ProgramFiles 'Tailscale\tailscale.exe'
-          if (-not (Test-Path $ts)) { $ts = Join-Path ${Env:ProgramFiles(x86)} 'Tailscale\tailscale.exe' }
-          if (-not (Test-Path $ts)) { throw 'tailscale.exe not found after install' }
+          $env:PATH = "$env:ProgramFiles\Tailscale;$env:PATH"
+          tailscale up --auth-key "${env:TS_AUTHKEY}" --hostname "${env:TS_HOST}" --accept-dns=true --unattended=true
+          $ipv4 = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -match 'Tailscale' } | Select-Object -First 1).IPAddress
 
-          # ensure service is running if present
-          Start-Service Tailscale -ErrorAction SilentlyContinue
-
-          & $ts up --auth-key "tskey-auth-kCBNtpbt3H11CNTRL-rJdYwx6bnR59Gj4ivN4DR5JKvahLZ5ML" `
-                   --hostname bullet --accept-routes --accept-dns=false
-          Start-Sleep 5
-
-          $ipv4 = (& $ts ip -4 | Select-Object -First 1)
-          $ipv6 = (& $ts ip -6 | Select-Object -First 1)
           Write-Host "================ RDP CONNECT ================"
-          Write-Host "Hostname : bullet"
+          Write-Host "MagicDNS : ${env:TS_HOST}"
           Write-Host "IPv4     : $ipv4"
-          Write-Host "IPv6     : $ipv6"
-          Write-Host "mstsc    : mstsc /v:bullet"
-          Write-Host "Username : Bullettemporary"
-          Write-Host "Password : Bullet@12345"
-          Write-Host "============================================="
+          Write-Host "mstsc    : mstsc /v:${env:TS_HOST}"
+          Write-Host "Username : ${env:RDP_USER}"
+          Write-Host "Password : ${env:RDP_PASS}"
+          Write-Host "============================================"
 
-      - name: Keep alive (~5h 55m) & pre-dispatch partner (B)
+      - name: Pre-dispatch partner (B) in background (t-5m)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $parts = $env:GITHUB_REPOSITORY.Split('/')
+          $owner,$repo = $parts[0],$parts[1]
+          $workflowFile = 'windows-rdp-tailscale-B.yml'
+          $seconds = 355*60 - 300  # (5h55m - 5m)
+          Start-Job -ScriptBlock {
+            param($o,$r,$wf,$tok,$sec)
+            Start-Sleep -Seconds $sec
+            $uri  = "https://api.github.com/repos/$o/$r/actions/workflows/$wf/dispatches"
+            $body = @{ ref = $env:GITHUB_REF_NAME } | ConvertTo-Json
+            Invoke-RestMethod -Method POST -Uri $uri -Headers @{ Authorization="Bearer $tok"; "Accept"="application/vnd.github+json"; "User-Agent"="gha" } -Body $body
+            Write-Host "Partner workflow dispatched: $wf"
+          } -ArgumentList $owner,$repo,$workflowFile,$env:GH_TOKEN,$seconds | Out-Null
+          Write-Host "Background dispatcher armed."
+
+      - name: Keep alive (~5h55m)
         shell: pwsh
         run: |
           $until = (Get-Date).AddMinutes(355)
           while ((Get-Date) -lt $until) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] RDP alive.."
+            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] RDP alive.."
             Start-Sleep 60
           }
-          Invoke-RestMethod -Method POST `
-            -Uri https://api.github.com/repos/${{ github.repository }}/actions/workflows/windows-rdp-tailscale-B.yml/dispatches `
-            -Headers @{ Authorization = "token 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"; "Accept"="application/vnd.github+json" } `
-            -Body '{"ref":"main"}'
