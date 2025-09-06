@@ -1,0 +1,126 @@
+name: Windows RDP via Tailscale (A)
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [start_a]
+
+permissions:
+  contents: read
+  actions: write    # to dispatch partner
+
+env:
+  # ---- Your choices ----
+  RDP_USER: Bullettemporary
+  RDP_PASS: Bullet@12345
+  TS_HOST: bullet
+
+  # ---- Your Tailscale keys (as requested, inline) ----
+  # Ephemeral+Reusable auth key
+  TS_AUTHKEY: tskey-auth-k3hPLZv7pr11CNTRL-nbSsHPZ3EQTdMnUK8MLdPTuc9uWGQVvx
+  # API token for device cleanup
+  TS_APIKEY: tskey-api-kau5CptpYW11CNTRL-znAxhkNKX85Kb69ezRYu75QEdeBCSZtqe
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Install Tailscale (via choco)
+        shell: pwsh
+        run: |
+          choco install tailscale -y --no-progress
+
+      - name: Enable RDP + user + firewall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $u = "${env:RDP_USER}"
+          $p = "${env:RDP_PASS}"
+          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires
+            Add-LocalGroupMember -Group Administrators -Member $u
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
+          } else {
+            Set-LocalUser -Name $u -Password $sec -AccountNeverExpires $true
+            Enable-LocalUser -Name $u
+          }
+
+          # Enable RDP + firewall
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
+
+      - name: Tailscale up (fixed hostname)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          # Join tailnet with ephemeral key (required for your key type)
+          & $ts up --auth-key "${env:TS_AUTHKEY}" --hostname "${env:TS_HOST}" --unattended --accept-dns=true --ephemeral
+          if ($LASTEXITCODE -ne 0) { throw "tailscale up failed" }
+
+          # Wait until the device actually has IPs
+          for ($i=0; $i -lt 10; $i++) {
+            Start-Sleep -Seconds 5
+            $st = & $ts status --json | ConvertFrom-Json
+            if ($st.Self -and $st.Self.Addresses.Count -gt 0) {
+              $self = $st.Self
+              break
+            }
+          }
+          if (-not $self) { throw "Tailscale did not come online." }
+
+          $ipv4 = ($self.Addresses | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' })[0]
+          $ipv6 = ($self.Addresses | Where-Object { $_ -match ':' })[0]
+
+          "================ RDP CONNECT =================" | Write-Host
+          ("MagicDNS : {0}" -f $self.DNSName) | Write-Host
+          ("IPv4     : {0}" -f $ipv4) | Write-Host
+          ("IPv6     : {0}" -f $ipv6) | Write-Host
+          ("mstsc    : mstsc /v:{0}" -f $self.DNSName) | Write-Host
+          ("Username : {0}" -f $env:RDP_USER) | Write-Host
+          ("Password : {0}" -f $env:RDP_PASS) | Write-Host
+          "==============================================" | Write-Host
+
+          # Save device id for cleanup
+          "$($self.ID)" | Out-File -FilePath $env:RUNNER_TEMP\ts_device_id.txt -Encoding ascii
+
+      - name: Keep alive (~5h50m) & pre-dispatch partner (B)
+        shell: pwsh
+        env:
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $until  = (Get-Date).AddMinutes(350)    # ~5h50m
+          $kickAt = (Get-Date).AddMinutes(345)    # 5 minutes before end
+
+          while ((Get-Date) -lt $until) {
+            if ((Get-Date) -ge $kickAt -and -not (Test-Path "$env:RUNNER_TEMP\kicked.txt")) {
+              # Tell B to start now
+              $uri = "https://api.github.com/repos/$env:REPO/dispatches"
+              $body = @{ event_type = "start_b" } | ConvertTo-Json
+              Invoke-RestMethod -Method POST -Uri $uri -Headers @{Authorization="Bearer $env:GH_TOKEN"; "Accept"="application/vnd.github+json"} -Body $body
+              "done" | Out-File "$env:RUNNER_TEMP\kicked.txt"
+            }
+            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] RDP alive…"
+            Start-Sleep -Seconds 60
+          }
+
+      - name: Cleanup device from tailnet (delete this runner)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+          $tsDevId = Get-Content "$env:RUNNER_TEMP\ts_device_id.txt" -ErrorAction SilentlyContinue
+          if ($tsDevId) {
+            $uri = "https://api.tailscale.com/api/v2/device/$tsDevId"
+            Invoke-RestMethod -Method DELETE -Uri $uri -Headers @{ Authorization = "Bearer ${env:TS_APIKEY}" } | Out-Null
+            Write-Host "Deleted device $tsDevId from tailnet."
+          } else {
+            Write-Host "No device id found; nothing to delete."
+          }
