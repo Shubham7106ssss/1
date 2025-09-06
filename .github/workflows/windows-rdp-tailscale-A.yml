@@ -1,71 +1,127 @@
 name: Windows RDP via Tailscale (A)
 
 on:
-  workflow_dispatch: {}
-  workflow_run:
-    workflows: ["Windows RDP via Tailscale (B)"]
-    types: [completed]
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/windows-rdp-tailscale-A.yml
 
 jobs:
   rdp:
     runs-on: windows-latest
-    timeout-minutes: 360      # ~6h GitHub cap
+    timeout-minutes: 360
     env:
-      FIXED_HOSTNAME: gha-rdp
+      # Inline creds (requested)
+      TAILSCALE_AUTHKEY: tskey-auth-k3hPLZv7pr11CNTRL-nbSsHPZ3EQTdMnUK8MLdPTuc9uWGQVvx
+      GH_PAT: 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
+
+      TS_HOSTNAME: gha-rdp
       RDP_USER: Bullettemporary
-      RDP_PASSWORD: Bullet@12345
-      TAILSCALE_AUTH_KEY: tskey-auth-k9jRYku9c111CNTRL-EH6Haqd3XkDjEh1TNgKujDzgLUkQH4cP
+      RDP_PASS: Bullet@12345
+
+      PARTNER_WORKFLOW: windows-rdp-tailscale-B.yml
+      THIS_WORKFLOW: windows-rdp-tailscale-A.yml
+
     steps:
+      - name: Mask tokens in logs
+        shell: pwsh
+        run: |
+          echo "::add-mask::$env:TAILSCALE_AUTHKEY"
+          echo "::add-mask::$env:GH_PAT"
+
       - name: Install Tailscale
         shell: pwsh
         run: |
-          $msi  = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi
-          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait
+          $msi = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest.msi" -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn" -Wait
           Remove-Item $msi -Force
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" version
 
       - name: Enable RDP + user + firewall
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
-          $sec = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-          if (-not (Get-LocalUser -Name $env:RDP_USER -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $env:RDP_USER -Password $sec -AccountNeverExpires
+          $u  = $env:RDP_USER
+          $pw = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $u -Password $pw -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member $u
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
           } else {
-            Set-LocalUser -Name $env:RDP_USER -Password $sec -AccountNeverExpires:$true
-            Enable-LocalUser -Name $env:RDP_USER
+            Set-LocalUser -Name $u -Password $pw -AccountNeverExpires:$true
+            Enable-LocalUser -Name $u
           }
-          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER -ErrorAction SilentlyContinue
 
       - name: Tailscale up (fixed hostname)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          & $ts up --authkey "$env:TAILSCALE_AUTH_KEY" --hostname "$env:FIXED_HOSTNAME" --reset
+          $ts = "C:\Program Files\Tailscale\tailscale.exe"
+          & $ts up `
+            --authkey "$env:TAILSCALE_AUTHKEY" `
+            --hostname "$env:TS_HOSTNAME" `
+            --accept-routes=false --accept-dns=true `
+            --unattended --reset --ephemeral=true
           if ($LASTEXITCODE -ne 0) { throw "tailscale up failed" }
 
-          $ip4 = & $ts ip -4
-          $ip6 = & $ts ip -6
+          $ips = & $ts ip
+          $ipv4 = ($ips | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -First 1)
+          Write-Host "================ RDP CONNECT ================="
+          Write-Host ("MagicDNS name : {0}" -f $env:TS_HOSTNAME)
+          Write-Host ("IPv4          : {0}" -f $ipv4)
+          Write-Host ("mstsc         : mstsc /v:{0}" -f $env:TS_HOSTNAME)
+          Write-Host ("Username      : {0}" -f $env:RDP_USER)
+          Write-Host ("Password      : {0}" -f $env:RDP_PASS)
+          Write-Host "================================================"
 
-          Write-Host "================ RDP CONNECT ================"
-          Write-Host "MagicDNS name : $env:FIXED_HOSTNAME"
-          Write-Host "IPv4          : $ip4"
-          Write-Host "IPv6          : $ip6"
-          Write-Host "mstsc         : mstsc /v:$($env:FIXED_HOSTNAME)"
-          Write-Host "Username      : $env:RDP_USER"
-          Write-Host "Password      : $env:RDP_PASSWORD"
-          Write-Host "============================================"
-
-      - name: Keep alive (~5h 50m)
+      - name: Keep alive and pre-dispatch partner (~5h40m)
         shell: pwsh
         run: |
-          $until = (Get-Date).AddMinutes(350)
-          while ((Get-Date) -lt $until) {
-            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] RDP alive…"
-            Start-Sleep -Seconds 300
+          $ErrorActionPreference = 'Stop'
+          $owner,$repo = $env:GITHUB_REPOSITORY.Split('/')
+          $ref = $env:GITHUB_REF_NAME; if (-not $ref) { $ref = 'main' }
+          $dispatch = {
+            param($wf)
+            $body = @{ ref = $ref } | ConvertTo-Json
+            $url  = "https://api.github.com/repos/$owner/$repo/actions/workflows/$wf/dispatches"
+            $hdrs = @{
+              "Authorization" = "token $env:GH_PAT"
+              "Accept"        = "application/vnd.github+json"
+              "User-Agent"    = "$owner-$repo-rdp-loop"
+            }
+            Invoke-RestMethod -Method Post -Uri $url -Headers $hdrs -Body $body -ContentType "application/json"
+            Write-Host "Dispatched $wf on ref '$ref'."
           }
+
+          $handoff = (Get-Date).AddMinutes(340)  # ~5h40m
+          while ((Get-Date) -lt $handoff) {
+            Write-Output "[{0}] RDP alive..." -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            Start-Sleep -Seconds 60
+          }
+
+          & $dispatch $env:PARTNER_WORKFLOW
+          Write-Host "Partner dispatched; continuing for a short overlap..."
+
+          $until = (Get-Date).AddMinutes(10)     # ~10 min overlap
+          while ((Get-Date) -lt $until) {
+            Write-Output "[{0}] Overlap period..." -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            Start-Sleep -Seconds 60
+          }
+
+      - name: Safety re-dispatch partner on exit
+        if: always()
+        shell: pwsh
+        run: |
+          $owner,$repo = $env:GITHUB_REPOSITORY.Split('/')
+          $ref = $env:GITHUB_REF_NAME; if (-not $ref) { $ref = 'main' }
+          $body = @{ ref = $ref } | ConvertTo-Json
+          $url  = "https://api.github.com/repos/$owner/$repo/actions/workflows/$($env:PARTNER_WORKFLOW)/dispatches"
+          $hdrs = @{
+            "Authorization" = "token $env:GH_PAT"
+            "Accept"        = "application/vnd.github+json"
+            "User-Agent"    = "$owner-$repo-rdp-loop"
+          }
+          Invoke-RestMethod -Method Post -Uri $url -Headers $hdrs -Body $body -ContentType "application/json"
+          Write-Host "Safety dispatch sent."
